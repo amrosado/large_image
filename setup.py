@@ -31,6 +31,7 @@ extraReqs = {
 }
 sources = {
     'bioformats': [f'large-image-source-bioformats{limit_version}'],
+    'czi': [f'large-image-source-czi{limit_version}'],
     'deepzoom': [f'large-image-source-deepzoom{limit_version}'],
     'dicom': [f'large-image-source-dicom{limit_version}'],
     'dummy': [f'large-image-source-dummy{limit_version}'],

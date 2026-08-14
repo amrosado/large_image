@@ -1,5 +1,6 @@
 # Top level dependencies
 sources/bioformats
+sources/czi
 sources/deepzoom
 sources/dicom
 sources/dummy

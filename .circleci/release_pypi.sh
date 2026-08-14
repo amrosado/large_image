@@ -45,6 +45,12 @@ cp "$ROOTPATH/LICENSE" .
 python setup.py sdist
 pip wheel . --no-deps -w dist
 twine ${1:-check} $( [[ "${1:-check}" == "upload" ]] && printf %s '--verbose' ) dist/*
+cd "$ROOTPATH/sources/czi"
+cp "$ROOTPATH/README.rst" .
+cp "$ROOTPATH/LICENSE" .
+python setup.py sdist
+pip wheel . --no-deps -w dist
+twine ${1:-check} $( [[ "${1:-check}" == "upload" ]] && printf %s '--verbose' ) dist/*
 cd "$ROOTPATH/sources/deepzoom"
 cp "$ROOTPATH/README.rst" .
 cp "$ROOTPATH/LICENSE" .

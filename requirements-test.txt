@@ -2,6 +2,7 @@
 girder>=3.1.18,<5
 girder-jobs>=3.0.3,<5
 sources/bioformats
+sources/czi
 sources/deepzoom
 sources/dicom
 sources/dummy

@@ -122,6 +122,8 @@ Large Image consists of several Python modules designed to work together.  These
 
   - ``large-image-source-bioformats``: A tile source for reading any file handled by the Java Bioformats library.
 
+  - ``large-image-source-czi``: A tile source for reading Carl Zeiss Image files through pylibCZIrw and libCZI.
+
   - ``large-image-source-deepzoom``: A tile source for reading Deepzoom tiles.
 
   - ``large-image-source-dicom``: A tile source for reading DICOM Whole Slide Images (WSI).
