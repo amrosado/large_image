@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import large_image
-from large_image.exceptions import TileSourceError, TileSourceFileNotFoundError
+from large_image.exceptions import TileSourceFileNotFoundError
 
 from . import utilities
 from .datastore import datastore
@@ -93,6 +93,21 @@ class FakeCZIReader:
             return result
         return np.full((height, width, 1), 42, dtype=np.uint16)
 
+    def read_native(self, roi=None, plane=None, scene=None, pixel_type=None):
+        self.reads.append({
+            'roi': roi,
+            'plane': plane,
+            'scene': scene,
+            'pixel_type': pixel_type,
+            'native': True,
+        })
+        height, width = roi[3], roi[2]
+        if plane and plane.get('C') == 1:
+            result = np.empty((height, width, 3), dtype=np.uint16)
+            result[:] = (10, 20, 30)
+            return result
+        return np.full((height, width, 1), 42, dtype=np.uint16)
+
 
 @contextlib.contextmanager
 def fakeOpenCZI(_path, **kwargs):
@@ -104,9 +119,9 @@ def fakeOpenCZI(_path, **kwargs):
 @pytest.fixture
 def fakeCZI(monkeypatch):
     module = types.SimpleNamespace(
-        PERFORMANCE_API_VERSION=1,
         open_czi=fakeOpenCZI,
-        CacheOptions=lambda: types.SimpleNamespace(max_memory_usage=None),
+        CacheOptions=lambda: types.SimpleNamespace(
+            max_memory_usage=None, cache_decoded=False),
         ReaderOptions=lambda: types.SimpleNamespace(max_concurrent_subblock_reads=1),
     )
     monkeypatch.setattr(large_image_source_czi, 'czi', module)
@@ -119,7 +134,8 @@ def testCZIMetadataAndTiles(tmp_path, fakeCZI):
     source = large_image_source_czi.open(path)
     assert source._czi.metadata_reads == 0
     assert source._czi.open_kwargs['cache_options'].max_memory_usage == 512 * 1024 ** 2
-    assert source._czi.open_kwargs['reader_options'].max_concurrent_subblock_reads == 2
+    assert source._czi.open_kwargs['cache_options'].cache_decoded
+    assert source._czi.open_kwargs['reader_options'].max_concurrent_subblock_reads == 1
     assert not hasattr(source, '_tileLock')
 
     metadata = source.getMetadata()
@@ -155,11 +171,19 @@ def testCZIMetadataAndTiles(tmp_path, fakeCZI):
     source.getTile(0, 0, 1, frame=0, numpyAllowed=True)
     assert source._czi.reads[-1]['pixel_type'] == 'Gray16'
 
+    source.getTile(0, 0, 1, frame=7, numpyAllowed=True)
+    assert source._czi.reads[-1] == {
+        'roi': (-100, 50, 512, 512),
+        'plane': {'C': 1, 'Z': 0},
+        'scene': 1,
+        'pixel_type': 'Bgr48',
+        'native': True,
+    }
+
     internal = source.getInternalMetadata()
     assert source._czi.metadata_reads == 1
     assert internal['czi_pixel_types'] == {0: 'Gray8', 1: 'Bgr48'}
     assert internal['czi_scenes'][1] == (300, 50, 624, 600)
-    assert internal['czi_performance_api_version'] == 1
     source._close()
 
 
@@ -194,16 +218,6 @@ def testCZIMissingFile(fakeCZI, tmp_path):
         large_image_source_czi.open(tmp_path / 'missing.czi')
 
 
-def testCZILegacyBindingRejected(monkeypatch, tmp_path):
-    path = tmp_path / 'legacy.czi'
-    path.write_bytes(b'not needed by the fake reader')
-    monkeypatch.setattr(
-        large_image_source_czi, 'czi',
-        types.SimpleNamespace(PERFORMANCE_API_VERSION=0, open_czi=fakeOpenCZI))
-    with pytest.raises(TileSourceError, match='optimized libCZI API version 1'):
-        large_image_source_czi.open(path)
-
-
 def testTilesFromCZI():
     imagePath = datastore.fetch('HENormalN801.czi')
     source = large_image.open(imagePath)
@@ -218,6 +232,5 @@ def testTilesFromCZI():
     assert metadata['magnification'] == pytest.approx(20)
     assert metadata['dtype'] == 'uint8'
     assert metadata['bandCount'] == 3
-    assert large_image_source_czi.czi.PERFORMANCE_API_VERSION >= 1
     utilities.checkTilesZXY(source, metadata)
     assert 'czi' in source.getInternalMetadata()

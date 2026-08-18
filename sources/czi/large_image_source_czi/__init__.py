@@ -32,7 +32,6 @@ from large_image.tilesource import FileTileSource, utilities
 from large_image.tilesource.tileiterator import TileIterator
 
 czi = None
-_requiredPerformanceApiVersion = 1
 
 with contextlib.suppress(importlib.metadata.PackageNotFoundError):
     __version__ = importlib.metadata.version(__name__)
@@ -49,18 +48,6 @@ def _lazyImport():
             msg = 'pylibCZIrw module not found.'
             raise TileSourceError(msg) from None
         czi = czi_module
-
-
-def _requirePerformanceAPI():
-    """Ensure the native extension contains the optimized libCZI contract."""
-    version = int(getattr(czi, 'PERFORMANCE_API_VERSION', 0))
-    if version < _requiredPerformanceApiVersion:
-        msg = (
-            'The CZI source requires pylibCZIrw built with the optimized '
-            f'libCZI API version {_requiredPerformanceApiVersion} or newer; '
-            f'the loaded extension reports version {version}.')
-        raise TileSourceError(msg)
-    return version
 
 
 def _asList(value):
@@ -119,7 +106,10 @@ class CZIFileTileSource(FileTileSource, metaclass=LruCacheMetaclass):
     def __init__(self, path, **kwargs):
         """Initialize a CZI tile source from a filesystem path."""
         cacheBytes = max(0, int(kwargs.pop('cziCacheBytes', 512 * 1024 ** 2)))
-        readThreads = max(1, int(kwargs.pop('cziReadThreads', 2)))
+        # EagerIterator uses worker processes.  One native read thread per
+        # process avoids oversubscribing the CPU while preserving an override
+        # for single-process callers that benefit from native parallelism.
+        readThreads = max(1, int(kwargs.pop('cziReadThreads', 1)))
         useNativeTileSize = bool(kwargs.pop('cziNativeTileSize', True))
         self._directRegionMaxPixels = max(
             0, int(kwargs.pop('cziDirectRegionMaxPixels', 64 * 1024 ** 2)))
@@ -130,7 +120,6 @@ class CZIFileTileSource(FileTileSource, metaclass=LruCacheMetaclass):
             raise TileSourceFileNotFoundError(self._largeImagePath)
 
         _lazyImport()
-        self._cziPerformanceApiVersion = _requirePerformanceAPI()
         self._cziContext = None
         try:
             self._openCZI(cacheBytes, readThreads)
@@ -173,6 +162,11 @@ class CZIFileTileSource(FileTileSource, metaclass=LruCacheMetaclass):
         """Open pylibCZIrw with bounded caching and decode concurrency."""
         cacheOptions = czi.CacheOptions()
         cacheOptions.max_memory_usage = cacheBytes
+        # Decoded subblocks avoid repeated decode/compositor work when nearby
+        # regions are read.  It is optional so this source remains compatible
+        # with released pylibCZIrw builds that predate the setting.
+        with contextlib.suppress(AttributeError, TypeError):
+            cacheOptions.cache_decoded = True
         readerOptions = czi.ReaderOptions()
         readerOptions.max_concurrent_subblock_reads = readThreads
         self._cziContext = czi.open_czi(
@@ -360,26 +354,28 @@ class CZIFileTileSource(FileTileSource, metaclass=LruCacheMetaclass):
             'czi_dimensions': self._dimensionBounds,
             'czi_scenes': self._sceneRectangles,
             'czi_pixel_types': self._pixelTypes,
-            'czi_performance_api_version': self._cziPerformanceApiVersion,
         }
 
-    def _readCZI(self, x0, y0, x1, y1, zoom, frame):
+    def _readCZI(self, x0, y0, x1, y1, zoom, frame, native=False):
         """Read and normalize a CZI rectangle without serializing callers."""
         plane, scene, _indices, _sceneOffset = self._frameValues(frame)
         channel = plane.get('C', self._dimensionBounds.get('C', (0, 1))[0])
         pixelType = str(self._pixelTypes.get(channel, '')).lower()
-        tile = self._czi.read(
+        readKwargs = dict(
             roi=(self._originX + x0, self._originY + y0, x1 - x0, y1 - y0),
             plane=plane or None,
             scene=scene,
-            zoom=zoom,
             pixel_type=self._getOutputPixelType(pixelType),
         )
+        if native and hasattr(self._czi, 'read_native'):
+            tile = self._czi.read_native(**readKwargs)
+        else:
+            tile = self._czi.read(zoom=zoom, **readKwargs)
         tile = np.asarray(tile)
         if tile.ndim == 2:
             tile = tile[:, :, np.newaxis]
-        if pixelType.startswith('bgr') and tile.ndim == 3 and tile.shape[2] == 3:
-            tile = tile[:, :, ::-1]
+        if pixelType.startswith('bgr') and tile.ndim == 3 and tile.shape[2] >= 3:
+            tile = tile[:, :, [2, 1, 0] + list(range(3, tile.shape[2]))]
         return tile
 
     @methodcache()
@@ -389,7 +385,14 @@ class CZIFileTileSource(FileTileSource, metaclass=LruCacheMetaclass):
         self._xyzInRange(x, y, z, frame, self._frameCount)
         x0, y0, x1, y1, step = self._xyzToCorners(x, y, z)
         try:
-            tile = self._readCZI(x0, y0, x1, y1, 1.0 / step, frame)
+            # At full resolution, an interior virtual tile that exactly
+            # matches the advertised native subblock size can bypass libCZI's
+            # scaling/compositor path.  Older bindings simply use ``read``.
+            native = (
+                step == 1 and x1 - x0 == self.tileWidth and
+                y1 - y0 == self.tileHeight and
+                x1 <= self.sizeX and y1 <= self.sizeY)
+            tile = self._readCZI(x0, y0, x1, y1, 1.0 / step, frame, native=native)
         except Exception as exc:
             self.logger.debug('Failed to read CZI tile: %r', exc)
             msg = 'Failed to read CZI tile.'
